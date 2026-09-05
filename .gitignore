@@ -1,0 +1,13 @@
+.env
+backend/.env
+backend/*.db
+backend/data/raw/*
+!backend/data/raw/.gitkeep
+backend/data/processed/*
+!backend/data/processed/.gitkeep
+backend/ml/artifacts/*
+!backend/ml/artifacts/.gitkeep
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+.pytest_cache/

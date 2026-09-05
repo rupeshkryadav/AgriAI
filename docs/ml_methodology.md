@@ -1,0 +1,5 @@
+# ML methodology
+
+Price training uses cleaned AGMARKNET modal price records. It parses dates, removes duplicate rows, drops records without target/location/date, coerces price fields to numeric values, removes non-positive and implausibly large modal prices, derives year/month/day-of-year features, and fills optional location/variety values with `Unknown`. The split is chronological 80/20, never random. A median DummyRegressor baseline is evaluated first, then a one-hot categorical preprocessing pipeline plus RandomForestRegressor is persisted in `ml/artifacts/price_model.joblib`; MAE, baseline MAE, RMSE and R² are saved alongside it. The displayed range is prediction ± held-out MAE—not a calibrated statistical confidence interval.
+
+The disease baseline samples at most 250 valid images per actual PlantVillage class, resizes RGB leaves to 64×64 and trains an SGD logistic classifier. It is reproducible but is deliberately a baseline; PlantVillage’s controlled image setting can generalize poorly to field photos. The API advises professional/local extension confirmation.
