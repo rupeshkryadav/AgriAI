@@ -1,6 +1,16 @@
 .env
 backend/.env
 backend/*.db
+*.db
+*.sqlite
+*.sqlite3
+*.pt
+*.pth
+*.onnx
+*.weights
+backend/ml/crop_doctor_model.pt
+backend/ml/class_indices.json
+backend/uploads/
 backend/data/raw/*
 !backend/data/raw/.gitkeep
 backend/data/processed/*
@@ -11,3 +21,6 @@ frontend/node_modules/
 frontend/dist/
 __pycache__/
 .pytest_cache/
+**/.pytest_cache/
+pytest-cache-files-*/
+**/pytest-cache-files-*/
