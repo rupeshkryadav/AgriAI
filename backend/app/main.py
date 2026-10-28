@@ -1,19 +1,27 @@
 import os
 from pathlib import Path
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
-from sqlalchemy import select
-from .database import Base, engine, get_db
-from .models import User, Prediction, Post, Comment, Notification
+from sqlalchemy import select, delete
+from .database import Base, engine, get_db, initialize_database
+from .models import User, Prediction, Post, PostLike, Comment, Notification
 from .schemas import Register, Login, Profile, PriceRequest, PostInput, CommentInput
 from .core import hash_password, verify_password, token_for, decode_token
-from .services import market_frame, live_market_frame, predict_price, disease_predict
+from .services import market_frame, live_market_frame, predict_price
+from .ai_service import diagnose_leaf
 @asynccontextmanager
-async def lifespan(app): Base.metadata.create_all(engine); yield
-app=FastAPI(title='AgriAI Farmer Support API',version='1.0.0',lifespan=lifespan)
+async def lifespan(app): initialize_database(Base); yield
+app=FastAPI(title='FarmerConnect API',version='2.0.0',lifespan=lifespan)
+from .routers.ai_doctor import router as ai_doctor_router
+from .routers.market import router as mandi_router
+from .routers.community import router as community_router
+app.include_router(ai_doctor_router); app.include_router(mandi_router); app.include_router(community_router)
+UPLOAD_DIR=Path(__file__).resolve().parents[1]/'uploads'; UPLOAD_DIR.mkdir(parents=True,exist_ok=True)
+app.mount('/uploads',StaticFiles(directory=UPLOAD_DIR),name='uploads')
 app.add_middleware(CORSMiddleware,allow_origins=[x.strip() for x in os.getenv('CORS_ORIGINS','http://localhost:5173').split(',')],allow_origin_regex=r'https?://(localhost|127\.0\.0\.1)(:\d+)?',allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 bearer=HTTPBearer()
 def current(creds:HTTPAuthorizationCredentials=Depends(bearer),db:Session=Depends(get_db)):
@@ -30,7 +38,8 @@ def system_status():
         'Live market feed':{'ready':bool(os.getenv('DATA_GOV_API_KEY')),'detail':'India OGD / AGMARKNET API key configured.' if os.getenv('DATA_GOV_API_KEY') else 'DATA_GOV_API_KEY is not configured.'},
         'Historical market data':{'ready':(root/'data'/'processed'/'market_prices.csv').exists(),'detail':'Preprocessed market dataset is available.' if (root/'data'/'processed'/'market_prices.csv').exists() else 'Download and preprocess official market data first.'},
         'Price forecast model':{'ready':(root/'ml'/'artifacts'/'price_model.joblib').exists(),'detail':'Persisted price model is available.' if (root/'ml'/'artifacts'/'price_model.joblib').exists() else 'Train the price model after preprocessing data.'},
-        'Crop disease model':{'ready':(root/'ml'/'artifacts'/'disease_model.joblib').exists(),'detail':'Persisted disease model is available.' if (root/'ml'/'artifacts'/'disease_model.joblib').exists() else 'Download approved data and train the disease model.'},
+        'Crop disease model':{'ready':(root/'ml'/'crop_doctor_model.pt').exists() or (root/'ml'/'artifacts'/'disease_model.joblib').exists(),'detail':'Persisted crop doctor model is available.' if (root/'ml'/'crop_doctor_model.pt').exists() or (root/'ml'/'artifacts'/'disease_model.joblib').exists() else 'Train locally or configure GEMINI_API_KEY for vision fallback.'},
+        'AI Doctor':{'ready':bool(os.getenv('GEMINI_API_KEY')),'detail':'Gemini advice and multilingual chat are configured.' if os.getenv('GEMINI_API_KEY') else 'Configure GEMINI_API_KEY for AI-generated advice.'},
         'Database':{'ready':True,'detail':'Application database is configured; tables initialise on startup.'}
     }}
 @app.post('/api/auth/register',status_code=201)
@@ -66,10 +75,12 @@ def price_prediction(x:PriceRequest,u:User=Depends(current),db:Session=Depends(g
 def recent(u:User=Depends(current),db:Session=Depends(get_db)):
     return [{'id':p.id,'commodity':p.commodity,'predicted_price':p.predicted_price,'prediction_date':p.prediction_date,'created_at':p.created_at} for p in db.scalars(select(Prediction).where(Prediction.user_id==u.id).order_by(Prediction.created_at.desc()).limit(10))]
 @app.post('/api/disease/predict')
-async def disease(image:UploadFile=File(...),u:User=Depends(current)):
+async def disease(image:UploadFile=File(...),language:str=Form('English'),u:User=Depends(current)):
     if image.content_type not in {'image/jpeg','image/png','image/webp'}: raise HTTPException(415,'Only JPEG, PNG, and WEBP are allowed.')
-    return disease_predict(await image.read())
-def post_out(p): return {'id':p.id,'title':p.title,'body':p.body,'category':p.category,'created_at':p.created_at,'author':{'id':p.author.id,'name':p.author.name,'state':p.author.state},'comments':[{'id':c.id,'body':c.body,'created_at':c.created_at,'author':{'id':c.author.id,'name':c.author.name}} for c in p.comments]}
+    raw=await image.read()
+    if not raw or len(raw)>int(os.getenv('MAX_UPLOAD_MB','8'))*1024*1024: raise HTTPException(413,'Image is empty or exceeds the upload limit.')
+    return await diagnose_leaf(raw,image.content_type,language)
+def post_out(p): return {'id':p.id,'title':p.title,'body':p.body,'category':p.category,'likes':p.likes or 0,'image_url':p.image_url,'created_at':p.created_at,'author':{'id':p.author.id,'name':p.author.name,'state':p.author.state},'comments':[{'id':c.id,'body':c.body,'created_at':c.created_at,'author':{'id':c.author.id,'name':c.author.name}} for c in p.comments]}
 @app.get('/api/posts')
 def posts(db:Session=Depends(get_db)): return [post_out(p) for p in db.scalars(select(Post).order_by(Post.created_at.desc())).unique()]
 @app.post('/api/posts',status_code=201)
@@ -87,7 +98,12 @@ def delete_post(post_id:int,u:User=Depends(current),db:Session=Depends(get_db)):
     p=db.get(Post,post_id)
     if not p: raise HTTPException(404,'Post not found.')
     if p.user_id!=u.id: raise HTTPException(403,'You can delete only your own post.')
+    image_url=p.image_url
+    db.execute(delete(PostLike).where(PostLike.post_id==post_id))
     db.delete(p);db.commit()
+    if image_url and image_url.startswith('/uploads/'):
+        image_path=(UPLOAD_DIR/Path(image_url).name).resolve()
+        if image_path.parent==UPLOAD_DIR.resolve(): image_path.unlink(missing_ok=True)
 @app.post('/api/posts/{post_id}/comments',status_code=201)
 def add_comment(post_id:int,x:CommentInput,u:User=Depends(current),db:Session=Depends(get_db)):
     p=db.get(Post,post_id)
