@@ -20,6 +20,7 @@ backend/ml/artifacts/*
 !backend/ml/artifacts/.gitkeep
 frontend/node_modules/
 frontend/dist/
+backend/.venv/
 __pycache__/
 .pytest_cache/
 **/.pytest_cache/

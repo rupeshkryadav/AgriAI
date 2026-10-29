@@ -37,9 +37,12 @@ def _client():
 
 def _generate(contents, system_prompt):
     from google.genai import types
-    model=os.getenv('GEMINI_MODEL','gemini-3.6-flash').strip()
-    fallbacks=[x.strip() for x in os.getenv('GEMINI_FALLBACK_MODELS','gemini-flash-latest,gemini-3.8-flash').split(',') if x.strip() and x.strip()!=model]
+    # Prefer the current stable Flash endpoint, then use explicitly configured
+    # alternates. Model availability can differ between API projects.
+    model=os.getenv('GEMINI_MODEL','gemini-3.8-flash').strip()
+    fallbacks=[x.strip() for x in os.getenv('GEMINI_FALLBACK_MODELS','gemini-3.6-flash,gemini-flash-latest').split(',') if x.strip() and x.strip()!=model]
     client=_client()
+    failures=[]
     try:
         for index,candidate in enumerate([model,*fallbacks]):
             try:
@@ -52,10 +55,11 @@ def _generate(contents, system_prompt):
                         max_output_tokens=1400,
                     ),
                 )
-                if not result.text: raise HTTPException(502,'Gemini returned an empty response.')
+                if not result.text:
+                    failures.append(f'{candidate}:empty_response')
+                    logger.warning('Gemini model returned an empty response (%s).',candidate)
+                    continue
                 return result.text
-            except HTTPException:
-                raise
             except Exception as exc:
                 status=getattr(exc,'status_code',None) or getattr(exc,'code',None)
                 response=getattr(exc,'response',None)
@@ -64,10 +68,15 @@ def _generate(contents, system_prompt):
                 if status in (401,403) or 'api key not valid' in message or 'invalid api key' in message or 'api_key_invalid' in message:
                     raise HTTPException(401,GEMINI_KEY_ERROR) from exc
                 logger.warning('Gemini model request failed (%s, status=%s).', type(exc).__name__, status)
-                if index<len(fallbacks):
-                    continue
-                raise HTTPException(502,'Gemini request failed. Verify backend connectivity and the configured Gemini model.') from exc
-        raise HTTPException(503,'All configured Gemini models are temporarily unavailable.')
+                failures.append(f'{candidate}:{status or type(exc).__name__}')
+                continue
+        # Keep provider failure separate from app failures and expose an actionable
+        # status without leaking SDK response bodies or secrets to the browser.
+        if any(':429' in item or ':503' in item or ':504' in item for item in failures):
+            raise HTTPException(503,'Gemini is temporarily overloaded. Please retry in a few seconds.')
+        if any(':404' in item for item in failures):
+            raise HTTPException(503,'No configured Gemini model is available for this API key. Set GEMINI_MODEL to a model enabled for the project.')
+        raise HTTPException(502,'Gemini could not generate a response. Check the backend network and Gemini API project configuration.')
     finally:
         try:
             client.close()
