@@ -1,8 +1,8 @@
 import asyncio
 import io
 import json
+import logging
 import os
-import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,6 +12,7 @@ from PIL import Image
 ROOT=Path(__file__).resolve().parents[1]
 load_dotenv(ROOT/'.env')
 GEMINI_KEY_ERROR='Gemini API Key is missing or invalid in backend/.env'
+logger=logging.getLogger(__name__)
 AGRICULTURE_SYSTEM_PROMPT=(
     'You are FarmerConnect, an agricultural extension assistant for farmers in India. '
     'Give evidence-based, practical crop guidance in the requested language. Ask brief follow-up questions if crop, '
@@ -27,7 +28,7 @@ def _client():
         from google import genai
         from google.genai import types
         options=types.HttpOptions(
-            timeout=int(os.getenv('GEMINI_TIMEOUT_MS','45000')),
+            timeout=int(os.getenv('GEMINI_TIMEOUT_MS','25000')),
             retry_options=types.HttpRetryOptions(attempts=int(os.getenv('GEMINI_RETRY_ATTEMPTS','1'))),
         )
         return genai.Client(api_key=key,http_options=options)
@@ -36,8 +37,8 @@ def _client():
 
 def _generate(contents, system_prompt):
     from google.genai import types
-    model=os.getenv('GEMINI_MODEL','gemini-3.8-flash').strip()
-    fallbacks=[x.strip() for x in os.getenv('GEMINI_FALLBACK_MODELS','gemini-3.6-flash').split(',') if x.strip() and x.strip()!=model]
+    model=os.getenv('GEMINI_MODEL','gemini-3.6-flash').strip()
+    fallbacks=[x.strip() for x in os.getenv('GEMINI_FALLBACK_MODELS','gemini-flash-latest,gemini-3.8-flash').split(',') if x.strip() and x.strip()!=model]
     client=_client()
     try:
         for index,candidate in enumerate([model,*fallbacks]):
@@ -62,12 +63,17 @@ def _generate(contents, system_prompt):
                 message=str(exc).lower()
                 if status in (401,403) or 'api key not valid' in message or 'invalid api key' in message or 'api_key_invalid' in message:
                     raise HTTPException(401,GEMINI_KEY_ERROR) from exc
-                if index<len(fallbacks) and (status in (404,429,500,502,503,504) or re.search(r'\b(404|429|500|502|503|504)\b',message)):
+                logger.warning('Gemini model request failed (%s, status=%s).', type(exc).__name__, status)
+                if index<len(fallbacks):
                     continue
                 raise HTTPException(502,'Gemini request failed. Verify backend connectivity and the configured Gemini model.') from exc
         raise HTTPException(503,'All configured Gemini models are temporarily unavailable.')
     finally:
-        client.close()
+        try:
+            client.close()
+        except Exception:
+            # Cleanup failures must not replace a valid Gemini response.
+            pass
 
 def _local_leaf_prediction(raw):
     weights=ROOT/'ml'/'crop_doctor_model.pt'
@@ -90,16 +96,17 @@ def _local_leaf_prediction(raw):
         return None
 
 async def diagnose_leaf(raw:bytes,mime_type:str,language:str='English'):
+    response_language='the farmer\'s language, which may be inferred from the conversation; use English only if no language context is available' if not language or language.strip().casefold() in {'auto','auto-detect','detect'} else language
     local=_local_leaf_prediction(raw)
     hint=(f"A local image model suggested {local['disease']} at {local['confidence']}% confidence. Treat it only as a secondary clue. " if local else '')
-    prompt=(f'Analyze this crop leaf photograph and respond in {language}. {hint}'
+    prompt=(f'Analyze this crop leaf photograph and respond in {response_language}. {hint}'
             'Give: (1) likely disease or say it cannot be identified, with visual evidence and uncertainty; '
             '(2) severity as low, moderate, or high and why; (3) immediate field actions; '
             '(4) actionable organic treatment and prevention; (5) chemical treatment options only if reliable for this crop, '
             'with clear instruction to follow the locally registered product label. Do not guess dose. '
             'If image quality is insufficient, request a clearer close-up. State that photo screening is not lab confirmation.')
     from google.genai import types
-    result=await asyncio.to_thread(_generate,[prompt,types.Part.from_bytes(data=raw,mime_type=mime_type)],f'{AGRICULTURE_SYSTEM_PROMPT} Respond in {language}.')
+    result=await asyncio.to_thread(_generate,[prompt,types.Part.from_bytes(data=raw,mime_type=mime_type)],f'{AGRICULTURE_SYSTEM_PROMPT} Respond in {response_language}.')
     return {'disease':local['disease'] if local else 'Gemini visual diagnosis','confidence':local['confidence'] if local else None,'classifier':local['source'] if local else 'gemini_vision','diagnosis':result,'advice':result,'language':language,'disclaimer':'Photo screening is advisory and is not a laboratory diagnosis.'}
 
 async def chat_with_gemini(message:str,language:str='English',history=None):
@@ -111,5 +118,11 @@ async def chat_with_gemini(message:str,language:str='English',history=None):
         if role in ('user','model') and isinstance(text,str) and text.strip():
             contents.append(types.Content(role=role,parts=[types.Part.from_text(text=text[:3000])]))
     contents.append(types.Content(role='user',parts=[types.Part.from_text(text=message)]))
-    result=await asyncio.to_thread(_generate,contents,f'{AGRICULTURE_SYSTEM_PROMPT} Answer in {language}.')
+    response_language=(
+        'Detect the language of the farmer\'s latest message and answer naturally in that same language. '
+        'If it mixes languages, reply in the dominant language and preserve familiar agricultural terms.'
+        if not language or language.strip().casefold() in {'auto','auto-detect','detect'}
+        else f'Answer in {language}, as explicitly requested by the farmer.'
+    )
+    result=await asyncio.to_thread(_generate,contents,f'{AGRICULTURE_SYSTEM_PROMPT} {response_language}')
     return {'reply':result,'language':language,'available':True}

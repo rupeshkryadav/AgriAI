@@ -1,0 +1,7 @@
+# Mandi location and distance behavior
+
+Market requests query saved official AGMARKNET records in SQLite directly. The request path does not parse geographic boundary files, reverse-geocode coordinates, or make external network calls. District representative coordinates are precomputed once into `backend/data/processed/india_district_coordinates.json` from the Government of India Survey of India boundary dataset (NWIC, dataset metadata updated May 5, 2025): https://nwdp.nwic.gov.in/dataset/district-boundary.
+
+AGMARKNET does not publish coordinates for every record. During sync, FarmerConnect attaches the precomputed representative coordinate for that record's matched district and persists it on the mandi record. Haversine distance is calculated directly from browser GPS to those stored points. The points represent districts, not surveyed market-gate locations, so distances are estimates. For newer or unmatched district spellings, a coordinate averaged from that same state's published district points is used; it cannot substitute a coordinate from a different state, but is a coarser estimate.
+
+Without GPS, the selected or registered state and district filter saved records. The Market UI limits its initial loading indicator and network wait to three seconds and then offers the saved-data or error state. To rebuild the coordinate JSON from the official NWIC download, run `python backend/scripts/build_district_coordinate_index.py <district_nwic_geojson.zip>` with optional `shapely` and `pyproj` installed.

@@ -20,3 +20,7 @@ def initialize_database(Base):
         if inspect(engine).has_table('requirements'):
             requirement_columns={c['name'] for c in inspect(engine).get_columns('requirements')}
             if 'contact_phone' not in requirement_columns: connection.exec_driver_sql('ALTER TABLE requirements ADD COLUMN contact_phone VARCHAR(32)')
+        if inspect(engine).has_table('place_coordinates'):
+            coordinate_columns={c['name'] for c in inspect(engine).get_columns('place_coordinates')}
+            if 'state' not in coordinate_columns: connection.exec_driver_sql('ALTER TABLE place_coordinates ADD COLUMN state VARCHAR(100)')
+            if 'district' not in coordinate_columns: connection.exec_driver_sql('ALTER TABLE place_coordinates ADD COLUMN district VARCHAR(100)')

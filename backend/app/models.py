@@ -23,7 +23,10 @@ class Requirement(Base):
 	__tablename__='requirements'; id: Mapped[int]=mapped_column(primary_key=True); user_id: Mapped[int]=mapped_column(ForeignKey('users.id')); title: Mapped[str]=mapped_column(String(160)); description: Mapped[str]=mapped_column(Text); kind: Mapped[str]=mapped_column(String(30)); state: Mapped[str|None]=mapped_column(String(80)); district: Mapped[str|None]=mapped_column(String(80)); contact_phone: Mapped[str|None]=mapped_column(String(32),nullable=True); responses: Mapped[int]=mapped_column(Integer,default=0); created_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow); author=relationship('User')
 
 class PlaceCoordinate(Base):
-	__tablename__='place_coordinates'; place: Mapped[str]=mapped_column(String(320),primary_key=True); latitude: Mapped[float]=mapped_column(Float); longitude: Mapped[float]=mapped_column(Float); source: Mapped[str]=mapped_column(String(100),default='OpenStreetMap Nominatim'); updated_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
+	__tablename__='place_coordinates'; place: Mapped[str]=mapped_column(String(320),primary_key=True); latitude: Mapped[float]=mapped_column(Float); longitude: Mapped[float]=mapped_column(Float); source: Mapped[str]=mapped_column(String(100),default='verified coordinate'); state: Mapped[str|None]=mapped_column(String(100),nullable=True,index=True); district: Mapped[str|None]=mapped_column(String(100),nullable=True); updated_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow)
+
+class MandiStateSync(Base):
+	__tablename__='mandi_state_sync'; state: Mapped[str]=mapped_column(String(100),primary_key=True); records_count: Mapped[int]=mapped_column(Integer,default=0); synced_at: Mapped[datetime]=mapped_column(DateTime,default=datetime.utcnow,index=True)
 
 class MandiRecord(Base):
     __tablename__='mandi_records'

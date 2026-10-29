@@ -1,11 +1,15 @@
 from fastapi import APIRouter, Query
-from ..mandi_service import commodity_options, district_options, market_catalog, market_rates
+from ..mandi_service import commodity_options, district_options, market_catalog, market_rates, state_options
 
 router = APIRouter(prefix="/api/market", tags=["Mandi finder"])
 
 @router.get("/districts")
-def districts():
-    return district_options()
+def districts(state: str | None = Query(None)):
+    return district_options(state)
+
+@router.get("/states")
+def states():
+    return state_options()
 
 @router.get("/commodities")
 def commodities():

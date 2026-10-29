@@ -5,7 +5,7 @@ import pandas as pd
 import requests
 from fastapi import HTTPException
 from datetime import datetime, timezone
-from sqlalchemy import select
+from sqlalchemy import func, select
 from dotenv import load_dotenv
 from .database import SessionLocal
 from .models import MandiRecord
@@ -29,7 +29,12 @@ def live_market_frame(limit=100):
     try:
         if not key: raise RuntimeError('DATA_GOV_API_KEY is not configured.')
         session=requests.Session()
-        response=session.get(url,params={'api-key':key,'format':'json','limit':min(max(int(limit),1),100)},timeout=30.0)
+        response=session.get(
+            url,
+            params={'api-key':key,'format':'json','limit':min(max(int(limit),1),100)},
+            headers={'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'},
+            timeout=30.0,
+        )
         response.raise_for_status()
         records=response.json().get('records',[])
         frame=_normalize_mandi_records(records)
@@ -54,7 +59,12 @@ def _normalize_mandi_records(records):
     required={'commodity','state','district','market','arrival_date','min_price','max_price','modal_price'}
     if not required.issubset(frame.columns): raise ValueError('The data.gov.in response does not contain expected AGMARKNET fields.')
     if 'variety' not in frame: frame['variety']=None
+    if 'lat' not in frame and 'latitude' in frame: frame['lat']=frame['latitude']
+    if 'lon' not in frame and 'longitude' in frame: frame['lon']=frame['longitude']
     for col in ('min_price','max_price','modal_price'): frame[col]=pd.to_numeric(frame[col],errors='coerce')
+    for col in ('lat','lon'):
+        if col not in frame: frame[col]=None
+        frame[col]=pd.to_numeric(frame[col],errors='coerce')
     frame=frame.dropna(subset=['commodity','state','district','market','modal_price'])
     for col in ('commodity','state','district','market','arrival_date'):
         frame[col]=frame[col].fillna('').astype(str).str.strip()
@@ -64,10 +74,19 @@ def _normalize_mandi_records(records):
 def save_mandi_records(frame, coordinates=None, touch_updated_at=True):
     db=SessionLocal(); now=datetime.now(timezone.utc).replace(tzinfo=None)
     try:
+        coordinate_rows=db.execute(select(MandiRecord.state,MandiRecord.district,MandiRecord.lat,MandiRecord.lon).where(MandiRecord.lat.is_not(None),MandiRecord.lon.is_not(None))).all()
+        district_coordinates={}
+        for state_name,district_name,latitude,longitude in coordinate_rows:
+            district_coordinates.setdefault((str(state_name).casefold(),str(district_name).casefold()),(float(latitude),float(longitude)))
         for row in frame.to_dict('records'):
+            variety = row.get('variety') or ''
             coord=(coordinates or {}).get(', '.join((str(row.get('market','')),str(row.get('district','')),str(row.get('state','')))))
-            existing=db.scalar(select(MandiRecord).where(MandiRecord.commodity==row['commodity'],MandiRecord.variety==row.get('variety') or '',MandiRecord.state==row['state'],MandiRecord.district==row['district'],MandiRecord.market==row['market'],MandiRecord.arrival_date==row['arrival_date']))
-            values=dict(commodity=row['commodity'],variety=row.get('variety') or '',state=row['state'],district=row['district'],market=row['market'],min_price=None if pd.isna(row.get('min_price')) else float(row['min_price']),max_price=None if pd.isna(row.get('max_price')) else float(row['max_price']),modal_price=float(row['modal_price']),arrival_date=row['arrival_date'],lat=coord[0] if coord else (existing.lat if existing else None),lon=coord[1] if coord else (existing.lon if existing else None))
+            existing=db.scalar(select(MandiRecord).where(MandiRecord.commodity==row['commodity'],MandiRecord.variety==variety,MandiRecord.state==row['state'],MandiRecord.district==row['district'],MandiRecord.market==row['market'],MandiRecord.arrival_date==row['arrival_date']))
+            supplied_lat=row.get('lat'); supplied_lon=row.get('lon')
+            supplied=(float(supplied_lat),float(supplied_lon)) if pd.notna(supplied_lat) and pd.notna(supplied_lon) else None
+            district_point=district_coordinates.get((str(row['state']).casefold(),str(row['district']).casefold()))
+            resolved=coord or supplied or ((existing.lat,existing.lon) if existing and existing.lat is not None and existing.lon is not None else None) or district_point
+            values=dict(commodity=row['commodity'],variety=variety,state=row['state'],district=row['district'],market=row['market'],min_price=None if pd.isna(row.get('min_price')) else float(row['min_price']),max_price=None if pd.isna(row.get('max_price')) else float(row['max_price']),modal_price=float(row['modal_price']),arrival_date=row['arrival_date'],lat=resolved[0] if resolved else None,lon=resolved[1] if resolved else None)
             if touch_updated_at: values['updated_at']=now
             if existing:
                 for key,value in values.items(): setattr(existing,key,value)
@@ -78,17 +97,20 @@ def save_mandi_records(frame, coordinates=None, touch_updated_at=True):
         db.rollback(); raise
     finally: db.close()
 
-def read_cached_mandi_records():
+def read_cached_mandi_records(states=None):
     db=SessionLocal()
     try:
-        rows=db.scalars(select(MandiRecord).order_by(MandiRecord.arrival_date.desc())).all()
+        statement=select(MandiRecord)
+        if states:
+            statement=statement.where(func.lower(MandiRecord.state).in_([str(state).casefold() for state in states]))
+        rows=db.scalars(statement.order_by(MandiRecord.arrival_date.desc())).all()
         if not rows: return pd.DataFrame(columns=['commodity','variety','state','district','market','min_price','max_price','modal_price','arrival_date','lat','lon']),None
         latest=max(row.updated_at for row in rows)
         return pd.DataFrame([{'commodity':r.commodity,'variety':r.variety,'state':r.state,'district':r.district,'market':r.market,'min_price':r.min_price,'max_price':r.max_price,'modal_price':r.modal_price,'arrival_date':r.arrival_date,'lat':r.lat,'lon':r.lon} for r in rows]),latest.replace(tzinfo=timezone.utc).isoformat()
     finally: db.close()
 
-def cached_market_frame():
-    frame,sync_timestamp=read_cached_mandi_records()
+def cached_market_frame(states=None):
+    frame,sync_timestamp=read_cached_mandi_records(states)
     frame.attrs['source']='cached_real' if not frame.empty else None
     frame.attrs['sync_timestamp']=sync_timestamp
     return frame
