@@ -15,7 +15,8 @@ GEMINI_KEY_ERROR='Gemini API Key is missing or invalid in backend/.env'
 logger=logging.getLogger(__name__)
 AGRICULTURE_SYSTEM_PROMPT=(
     'You are FarmerConnect, an agricultural extension assistant for farmers in India. '
-    'Give evidence-based, practical crop guidance in the requested language. Ask brief follow-up questions if crop, '
+    'Give a complete, clear, practical answer in the farmer\'s requested or detected language. Use that language\'s natural script, '
+    'do not switch to English unless requested, and do not omit important steps just to be brief. Ask brief follow-up questions if crop, '
     'region, growth stage, or symptoms are needed. Never invent prices, pesticide products, or dosage. For chemical '
     'options, provide only label-consistent active ingredients and direct the farmer to follow the exact local product '
     'label, protective equipment, pre-harvest interval, and local KVK/agronomist guidance.'
@@ -52,7 +53,7 @@ def _generate(contents, system_prompt):
                     config=types.GenerateContentConfig(
                         system_instruction=system_prompt,
                         temperature=0.25,
-                        max_output_tokens=1400,
+                        max_output_tokens=int(os.getenv('GEMINI_MAX_OUTPUT_TOKENS','4096')),
                     ),
                 )
                 if not result.text:
@@ -128,10 +129,11 @@ async def chat_with_gemini(message:str,language:str='English',history=None):
             contents.append(types.Content(role=role,parts=[types.Part.from_text(text=text[:3000])]))
     contents.append(types.Content(role='user',parts=[types.Part.from_text(text=message)]))
     response_language=(
-        'Detect the language of the farmer\'s latest message and answer naturally in that same language. '
-        'If it mixes languages, reply in the dominant language and preserve familiar agricultural terms.'
+        'Detect the language of the farmer\'s latest message and answer fully and naturally in that same language and script. '
+        'If it mixes languages, reply in the dominant language and preserve familiar agricultural terms. '
+        'Give a useful, complete answer with steps and relevant cautions; do not return only a short opening or summary.'
         if not language or language.strip().casefold() in {'auto','auto-detect','detect'}
-        else f'Answer in {language}, as explicitly requested by the farmer.'
+        else f'Answer fully and naturally in {language}, using its normal script, as explicitly requested by the farmer. Do not switch to English.'
     )
     result=await asyncio.to_thread(_generate,contents,f'{AGRICULTURE_SYSTEM_PROMPT} {response_language}')
     return {'reply':result,'language':language,'available':True}
